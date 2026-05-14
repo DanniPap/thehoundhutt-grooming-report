@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Hound Hutt — Grooming Daily Report</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useMemo, useEffect } = React;
+
+const _storage = {
+  async list(prefix) {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(prefix));
+    return { keys };
+  },
+  async get(key) {
+    const value = localStorage.getItem(key);
+    return value !== null ? { value } : null;
+  },
+  async set(key, value) {
+    localStorage.setItem(key, String(value));
+    return { key, value };
+  }
+};
+
+// ── Google Sheets sync ───────────────────────────────────────────
+const GROOMING_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz6fDeku6udgbZDcc_T3gWEZs5PCtGs5l1NJ5p6xSt7vHEufHuRM1BZjpKUSq6UeU-e/exec';
+
+async function syncToSheets(key, report) {
+  try {
+    const payload = encodeURIComponent(JSON.stringify({ key, report }));
+    await fetch(GROOMING_SCRIPT_URL + '?action=saveGrooming&data=' + payload);
+  } catch(e) {
+    console.warn('Sheets sync failed:', e);
+  }
+}
+
+function downloadCSV(reports) {
+  const blob = new Blob([buildCSV(reports)], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "hound-hutt-grooming-reports.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+
+const MOODS = ["😄","😊","😐","😕","😤"];
+const MOOD_LABELS = ["Great","Good","Okay","Down","Stressed"];
+const SERVICES = ["Full Groom","Maintenance Groom","Style Groom","Deshed","Puppy Cut"];
+const EMPTY_OPS = { noShows:"", newClients:"", dogBehaviour:5 };
+const NUM_SLOTS = 8;
+const DOG_BEHAVIOUR_LABELS = {1:"Very Difficult",2:"Mostly Difficult",3:"Challenging",4:"Below Average",5:"Average",6:"Above Average",7:"Good",8:"Well Behaved",9:"Excellent",10:"Perfect Angels"};
+const DOG_BEHAVIOUR_COLOR = v => v<=2?"#ef4444":v<=4?"#f97316":v<=6?"#eab308":v<=8?"#84cc16":"#22c55e";
+const emptySlot = () => ({ dogName:"", service:"Full Groom", isLargeXL:false });
+const emptyGroomer = () => ({ name:"", mood:1, hours:"", mins:"", slots: Array.from({length:NUM_SLOTS}, emptySlot) });
+
+// ── Format hours as Xh Ym ────────────────────────────────────────
+function fmtTime(decimalHrs) {
+  const totalMins = Math.round(decimalHrs * 60);
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h === 0) return `${m} min`;
+  if (m === 0) return `${h} hr`;
+  return `${h} hr ${m} min`;
+}
+
+// ── CSV Export ────────────────────────────────────────────────────
+function buildCSV(reports) {
+  const sorted=[...reports].sort((a,b)=>a.date.localeCompare(b.date));
+  const esc=v=>`"${String(v??"").replace(/"/g,'""')}"`;
+  const headers=["Date","Total Hours","Groomers","Total Dogs","Total Slots","No-Shows","New Clients","Dog Behaviour Score","Dog Behaviour","Notes"];
+  // Add per-groomer dog columns dynamically based on max groomers
+  const rows=sorted.map(r=>{
+    const groomerSummaries = r.groomers.map(g=>{
+      const filled = g.slots.filter(s=>s.dogName.trim());
+      return `${g.name} (${g.hours}h, ${MOOD_LABELS[g.mood]||g.mood}): ${filled.map(s=>`${s.dogName} - ${s.service}${s.isLargeXL?" [L/XL]":""}`).join(", ")}`;
+    });
+    return [
+      r.date, r.totalHours,
+      r.groomers.map(g=>g.name).join(", "),
+      r.totalDogs, r.totalSlots,
+      r.ops.noShows??0, r.ops.newClients??0,
+      r.ops.dogBehaviour??5, DOG_BEHAVIOUR_LABELS[r.ops.dogBehaviour??5],
+      r.notes??"",
+    ].map(esc).concat([esc(groomerSummaries.join(" | "))]);
+  });
+  return [headers.concat(["Groomer Detail"]).map(esc),...rows].map(r=>r.join(",")).join("\n");
+}
+function CSVModal({ csv, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(csv).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);});
+  };
+  return (
+    <div style={{position:"fixed",inset:0,backgroundColor:"rgba(0,0,0,0.6)",zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{backgroundColor:"white",borderRadius:16,padding:20,width:"100%",maxWidth:560,maxHeight:"80vh",display:"flex",flexDirection:"column",gap:12,fontFamily:"'Nunito','Segoe UI',sans-serif"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontWeight:900,fontSize:17}}>📊 Export CSV Data</div>
+          <button onClick={onClose} style={{background:"#f1f5f9",border:"none",borderRadius:8,width:32,height:32,fontSize:16,cursor:"pointer",fontFamily:"inherit"}}>✕</button>
+        </div>
+        <p style={{fontSize:13,color:"#64748b",margin:0}}>Copy everything below, then paste into Excel or Google Sheets (File → Import, or just paste into cell A1).</p>
+        <textarea readOnly value={csv} onClick={e=>e.target.select()}
+          style={{flex:1,minHeight:220,fontFamily:"monospace",fontSize:11,border:"1.5px solid #e2e8f0",borderRadius:10,padding:10,resize:"none",color:"#0f172a",backgroundColor:"#f8fafc"}}/>
+        <button onClick={copy} style={{padding:"13px",borderRadius:12,border:"none",backgroundColor:copied?"#22c55e":"#c85a2a",color:"white",fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit",transition:"background 0.2s"}}>
+          {copied?"✅ Copied!":"📋 Copy All"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Report Detail Screen ──────────────────────────────────────────
+function ReportDetailScreen({ report:r, onBack }) {
+  const dateStr=new Date(r.date+"T00:00:00").toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
+  const moodEmoji={"Great":"😄","Good":"😊","Okay":"😐","Down":"😕","Stressed":"😤"};
+  const C={purple:"#c85a2a",muted:"#64748b",border:"#e8edf2"};
+  const serviceShort={"Full Groom":"Full","Maintenance Groom":"Maint.","Style Groom":"Style","Deshed":"Deshed","Puppy Cut":"Puppy"};
+
+  return (
+    <div style={{fontFamily:"'Nunito','Segoe UI',sans-serif",backgroundColor:"white",minHeight:"100vh",color:"#0f172a"}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap'); *{box-sizing:border-box}`}</style>
+      <div style={{backgroundColor:C.purple,padding:"8px 12px",display:"flex",alignItems:"center",gap:8,position:"sticky",top:0,zIndex:10}}>
+        <button onClick={onBack} style={{background:"rgba(255,255,255,0.2)",border:"none",borderRadius:8,padding:"6px 10px",color:"white",fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>← Back</button>
+        <span style={{color:"white",fontWeight:700,fontSize:11,opacity:0.8}}>Take a screenshot of everything below and post it in the Daily Team Wheel Report chat</span>
+      </div>
+
+      <div style={{padding:"10px 10px 16px"}}>
+        {/* Header */}
+        <div style={{background:C.purple,color:"white",borderRadius:10,padding:"10px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{fontWeight:900,fontSize:14}}>✂️ THE HOUND HUTT — GROOMING DAILY REPORT</div>
+          <div style={{fontWeight:900,fontSize:13,whiteSpace:"nowrap",marginLeft:8}}>{dateStr}</div>
+        </div>
+
+        {/* Stat pills */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+          {[
+            {val:`${r.totalHours}h`,lbl:"TEAM HOURS",bg:"#fdf4ff",col:"#9333ea"},
+            {val:r.totalDogs,lbl:`DOGS · ${r.totalSlots} SLOTS`,bg:"#fef3c7",col:"#b45309"},
+            {val:r.groomers.length,lbl:"GROOMERS",bg:"#fff8f5",col:C.purple},
+          ].map((s,i)=>(
+            <div key={i} style={{backgroundColor:s.bg,borderRadius:8,padding:"8px 6px",textAlign:"center"}}>
+              <div style={{fontWeight:900,fontSize:20,color:s.col,lineHeight:1}}>{s.val}</div>
+              <div style={{fontSize:9,fontWeight:700,color:s.col,opacity:0.65,marginTop:3}}>{s.lbl}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Per-groomer table */}
+        <div style={{backgroundColor:"#f8fafc",borderRadius:8,padding:"8px 10px",marginBottom:6,overflowX:"auto"}}>
+          <div style={{fontSize:9,fontWeight:900,color:"#94a3b8",letterSpacing:"0.8px",textTransform:"uppercase",marginBottom:8}}>🐕 Booking Schedule</div>
+          <table style={{width:"100%",borderCollapse:"collapse",minWidth:r.groomers.length*120}}>
+            <thead>
+              <tr>
+                {r.groomers.map((g,i)=>(
+                  <>
+                    <th key={`n${i}`} style={{width:22,padding:"4px 4px",fontSize:10,fontWeight:700,color:C.muted,textAlign:"center",borderBottom:`2px solid ${C.border}`,borderLeft:i>0?`1px solid ${C.border}`:"none"}}>#</th>
+                    <th key={`g${i}`} style={{padding:"4px 8px",fontSize:12,fontWeight:900,color:C.purple,textAlign:"left",borderBottom:`2px solid ${C.border}`,borderLeft:`1px solid ${C.border}`}}>
+                      <div style={{fontWeight:900}}>{g.name}</div>
+                      <div style={{fontSize:9,color:C.muted,fontWeight:600}}>{g.hours}h</div>
+                    </th>
+                  </>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({length:NUM_SLOTS},(_,si)=>{
+                const anyFilled=r.groomers.some(g=>g.slots?.[si]?.dogName?.trim());
+                if(!anyFilled) return null;
+                return (
+                  <tr key={si} style={{backgroundColor:si%2===0?"white":"#f8fafc"}}>
+                    {r.groomers.map((g,gi)=>{
+                      const slot=g.slots?.[si];
+                      return (
+                        <>
+                          <td key={`n${gi}`} style={{padding:"4px 4px",fontSize:10,fontWeight:800,color:C.muted,textAlign:"center",borderBottom:`1px solid ${C.border}`,borderLeft:gi>0?`1px solid ${C.border}`:"none"}}>{si+1}</td>
+                          <td key={`d${gi}`} style={{padding:"4px 8px",fontSize:11,borderBottom:`1px solid ${C.border}`,borderLeft:`1px solid ${C.border}`,verticalAlign:"top"}}>
+                            {slot?.dogName?.trim()?(
+                              <div>
+                                <div style={{fontWeight:800}}>{slot.dogName}{slot.isLargeXL?" 🐾🐾":""}</div>
+                                <div style={{fontSize:9,color:C.muted,fontWeight:600}}>{serviceShort[slot.service]||slot.service}{slot.isLargeXL?" · 2 slots":""}</div>
+                              </div>
+                            ):(
+                              <span style={{color:"#cbd5e1",fontSize:10}}>—</span>
+                            )}
+                          </td>
+                        </>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Bottom two-col section */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+
+          {/* LEFT — behaviour + no-shows + notes */}
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+
+            {/* Dog Behaviour */}
+            {(()=>{const bv=r.ops.dogBehaviour??5;const bc=bv<=2?"#ef4444":bv<=4?"#f97316":bv<=6?"#eab308":bv<=8?"#84cc16":"#22c55e";return(
+              <div style={{backgroundColor:"#f8fafc",borderRadius:8,padding:"8px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:9,fontWeight:900,color:"#94a3b8",letterSpacing:"0.8px",textTransform:"uppercase",marginBottom:2}}>🐕 Dog Behaviour</div>
+                  <div style={{fontWeight:900,fontSize:13,color:bc}}>{DOG_BEHAVIOUR_LABELS[bv]}</div>
+                </div>
+                <div style={{fontWeight:900,fontSize:28,color:bc}}>{bv}/10</div>
+              </div>
+            );})()}
+
+            {/* No-Shows + New Clients */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+              {[["No-Shows",r.ops.noShows??0,"❌"],["New Clients",r.ops.newClients??0,"🆕"]].map(([label,val,emoji])=>(
+                <div key={label} style={{backgroundColor:"#f8fafc",borderRadius:8,padding:"7px 8px",display:"flex",flexDirection:"column",gap:2}}>
+                  <div style={{fontWeight:900,fontSize:22,color:C.purple,lineHeight:1}}>{val}</div>
+                  <div style={{fontSize:9,fontWeight:700,color:C.muted}}>{emoji} {label}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Notes */}
+            {r.notes&&(
+              <div style={{backgroundColor:"#fffbeb",border:"2px solid #f59e0b",borderRadius:8,padding:"10px 12px",flex:1}}>
+                <div style={{fontSize:10,fontWeight:900,color:"#92400e",marginBottom:4,letterSpacing:"0.5px"}}>📝 NOTES</div>
+                <div style={{fontSize:13,fontWeight:700,fontStyle:"italic",color:"#78350f",lineHeight:1.5}}>"{r.notes}"</div>
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT — avg time per dog */}
+          <div style={{backgroundColor:"#f8fafc",borderRadius:8,padding:"8px 10px"}}>
+            <div style={{fontSize:9,fontWeight:900,color:"#94a3b8",letterSpacing:"0.8px",textTransform:"uppercase",marginBottom:8}}>⏱️ Average Time Per Dog</div>
+            {r.groomers.map((g,i)=>{
+              const filled=g.slots.filter(s=>s.dogName.trim());
+              const hrs=parseFloat(g.hours)||0;
+              const avg=filled.length>0&&hrs>0?(hrs/filled.length):null;
+              const bc=avg?avg<=1?"#22c55e":avg<=1.5?"#84cc16":avg<=2?"#eab308":"#f97316":"#94a3b8";
+              return(
+                <div key={i} style={{marginBottom:i<r.groomers.length-1?10:0,paddingBottom:i<r.groomers.length-1?10:0,borderBottom:i<r.groomers.length-1?`1px solid ${C.border}`:"none"}}>
+                  <div style={{fontSize:11,fontWeight:800,marginBottom:2}}>✂️ {g.name}</div>
+                  <div style={{fontWeight:900,fontSize:22,color:bc,lineHeight:1}}>{avg?fmtTime(avg):"—"}</div>
+                  <div style={{fontSize:9,color:C.muted,fontWeight:600,marginTop:1}}>per dog · {filled.length} dogs</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={{textAlign:"center",marginTop:8,fontSize:9,color:"#94a3b8",fontWeight:600}}>
+          The Hound Hutt Grooming · {new Date(r.submittedAt||Date.now()).toLocaleString("en-AU",{day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── History Screen ────────────────────────────────────────────────
+function HistoryScreen({ reports, onBack, onEdit }) {
+  const C={purple:"#c85a2a",gold:"#FD8F67",muted:"#64748b",border:"#e2e8f0",text:"#0f172a"};
+  const [selected,setSelected]=useState(null);
+  const [csvData,setCsvData]=useState(null);
+  const sorted=[...reports].sort((a,b)=>b.date.localeCompare(a.date));
+  if(selected) return <ReportDetailScreen report={selected} onBack={()=>setSelected(null)}/>;
+  return (
+    <div style={{fontFamily:"'Nunito','Segoe UI',sans-serif",backgroundColor:"#fff8f5",minHeight:"100vh",color:C.text}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap'); *{box-sizing:border-box}`}</style>
+      <div style={{backgroundColor:C.purple,padding:"18px 16px",color:"white",position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <button onClick={onBack} style={{background:"rgba(255,255,255,0.18)",border:"none",borderRadius:10,padding:"8px 12px",color:"white",fontWeight:800,fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>← Back</button>
+          <div>
+            <div style={{fontWeight:900,fontSize:17}}>📋 Report History</div>
+            <div style={{fontSize:11,opacity:0.75,fontWeight:700}}>{reports.length} report{reports.length!==1?"s":""} saved</div>
+          </div>
+          <button onClick={()=>setCsvData(buildCSV(reports))} style={{marginLeft:"auto",backgroundColor:C.gold,border:"none",borderRadius:10,padding:"10px 16px",color:"white",fontWeight:800,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>⬇ Export CSV</button>
+        </div>
+      </div>
+      {csvData&&<CSVModal csv={csvData} onClose={()=>setCsvData(null)}/>}
+      <div style={{padding:"14px 14px 40px"}}>
+        {reports.length===0?(
+          <div style={{textAlign:"center",padding:"60px 20px",color:C.muted}}>
+            <div style={{fontSize:48,marginBottom:12}}>📭</div>
+            <div style={{fontWeight:800,fontSize:17}}>No reports yet</div>
+          </div>
+        ):sorted.map((r,i)=>(
+          <div key={i} style={{backgroundColor:"white",borderRadius:16,padding:"16px",marginBottom:12,boxShadow:"0 1px 8px rgba(0,0,0,0.06)",cursor:"pointer"}}
+            onClick={()=>setSelected(r)}
+            onMouseEnter={e=>e.currentTarget.style.boxShadow="0 4px 18px rgba(0,0,0,0.12)"}
+            onMouseLeave={e=>e.currentTarget.style.boxShadow="0 1px 8px rgba(0,0,0,0.06)"}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+              <div>
+                <div style={{fontWeight:900,fontSize:17}}>
+                  {new Date(r.date+"T00:00:00").toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short",year:"numeric"})}
+                </div>
+                <div style={{fontSize:13,color:C.muted,marginTop:2}}>
+                  {r.groomers.map(g=>g.hours>0?`${g.name} (${g.hours}h)`:g.name).join(", ")||"No groomers recorded"}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6,flexShrink:0,marginLeft:10}}>
+                <div style={{backgroundColor:"#fef3c7",borderRadius:10,padding:"6px 8px",textAlign:"center"}}>
+                  <div style={{fontWeight:900,fontSize:16,color:"#b45309"}}>{r.totalDogs}</div>
+                  <div style={{fontSize:9,color:C.muted,fontWeight:700}}>DOGS</div>
+                </div>
+                <div style={{backgroundColor:"#fdf4ff",borderRadius:10,padding:"6px 8px",textAlign:"center"}}>
+                  <div style={{fontWeight:900,fontSize:16,color:"#9333ea"}}>{r.totalHours}h</div>
+                  <div style={{fontSize:9,color:C.muted,fontWeight:700}}>HOURS</div>
+                </div>
+              </div>
+            </div>
+            <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <button onClick={e=>{e.stopPropagation();onEdit(r);}} style={{backgroundColor:"#fff8f5",border:"1.5px solid #FD8F67",borderRadius:8,padding:"7px 14px",color:C.purple,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✏️ Edit</button>
+              <span style={{fontSize:12,fontWeight:800,color:C.gold}}>📄 Tap to view report →</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────
+function App() {
+  const today=new Date().toISOString().split("T")[0];
+  const [view,setView]=useState("form");
+  const [step,setStep]=useState(1);
+  const [submitting,setSubmitting]=useState(false);
+  const [submitted,setSubmitted]=useState(false);
+  const [reports,setReports]=useState([]);
+  const [loadingReports,setLoadingReports]=useState(true);
+  const [lastReport,setLastReport]=useState(null);
+  const [editingKey,setEditingKey]=useState(null);
+  const [validationError,setValidationError]=useState("");
+
+  const [date,setDate]=useState(today);
+  const [groomers,setGroomers]=useState([emptyGroomer()]);
+  const [ops,setOps]=useState(EMPTY_OPS);
+  const [behaviourVal,setBehaviourVal]=useState(5);
+  // keep ops.dogBehaviour in sync with slider
+  const handleBehaviourChange = v => { setBehaviourVal(v); setOps(p=>({...p,dogBehaviour:v})); };
+  const [notes,setNotes]=useState("");
+
+  useEffect(()=>{
+    (async()=>{
+      try{
+        const result=await _storage.list("groom:");
+        if(result?.keys?.length){
+          const loaded=await Promise.all(result.keys.map(async key=>{
+            try{const r=await _storage.get(key);return r?{...JSON.parse(r.value),_storageKey:key}:null;}catch{return null;}
+          }));
+          setReports(loaded.filter(Boolean));
+        }
+      }catch(e){console.error(e);}
+      finally{setLoadingReports(false);}
+    })();
+  },[]);
+
+  const totalHours=useMemo(()=>groomers.reduce((s,g)=>s+(parseFloat(g.hours)||0)+(parseInt(g.mins)||0)/60,0).toFixed(2)*1,[groomers]);
+  const allFilledSlots=useMemo(()=>groomers.flatMap(g=>g.slots.filter(s=>s.dogName.trim())),[groomers]);
+  const totalDogs=allFilledSlots.length;
+  const totalSlots=allFilledSlots.reduce((s,d)=>s+(d.isLargeXL?2:1),0);
+
+  const addGroomer=()=>{setGroomers(p=>[...p,emptyGroomer()]);setValidationError("");};
+  const removeGroomer=idx=>setGroomers(p=>p.filter((_,i)=>i!==idx));
+  const updateGroomer=(idx,field,val)=>{
+    setGroomers(p=>p.map((g,i)=>i===idx?{...g,[field]:val}:g));
+    setValidationError("");
+  };
+  const updateSlot=(gIdx,sIdx,field,val)=>{
+    setGroomers(p=>p.map((g,i)=>i!==gIdx?g:{
+      ...g,slots:g.slots.map((s,j)=>j!==sIdx?s:{...s,[field]:val})
+    }));
+  };
+
+  const validate=(s)=>{
+    if(s===1){
+      const named=groomers.filter(g=>g.name.trim());
+      if(named.length===0) return "Please add at least one groomer.";
+      for(const g of named){if((g.hours===""||g.hours===null)&&(g.mins===""||g.mins===null)) return `Please enter time worked for ${g.name.trim()}.`;}
+    }
+    if(s===2){
+      if(ops.noShows==="") return 'Please enter a number for "No-Shows / Cancellations" (use 0 if none).';
+      if(ops.newClients==="") return 'Please enter a number for "New Clients" (use 0 if none).';
+    }
+    return "";
+  };
+
+  const handleNext=()=>{
+    const err=validate(step);
+    if(err){setValidationError(err);return;}
+    setValidationError("");setStep(s=>s+1);
+  };
+
+  const handleSubmit=async()=>{
+    const err=validate(2);
+    if(err){setValidationError(err);return;}
+    setValidationError("");setSubmitting(true);
+    const report={
+      date,
+      groomers:groomers.filter(g=>g.name.trim()).map(g=>({
+        name:g.name.trim(),
+        mood:MOOD_LABELS[g.mood],
+        hours:+(((parseFloat(g.hours)||0)+(parseInt(g.mins)||0)/60).toFixed(2)),
+        slots:g.slots.map(s=>({...s,dogName:s.dogName.trim()}))
+      })),
+      totalHours,totalDogs,totalSlots,
+      ops:{noShows:parseInt(ops.noShows)||0,newClients:parseInt(ops.newClients)||0,dogBehaviour:ops.dogBehaviour||5},
+      notes,
+      submittedAt:new Date().toISOString(),
+    };
+    try{
+      const key=editingKey||`hh-groom:${date}-${Date.now()}`;
+      const rk={...report,_storageKey:key};
+      await _storage.set(key,JSON.stringify(rk));
+      syncToSheets(key, rk);
+      setReports(prev=>editingKey?prev.map(r=>r._storageKey===editingKey?rk:r):[...prev,rk]);
+      setLastReport(rk);setEditingKey(null);setSubmitted(true);
+    }catch(e){alert("Save failed: "+e.message);}
+    finally{setSubmitting(false);}
+  };
+
+  const reset=()=>{
+    setSubmitted(false);setStep(1);setDate(today);setLastReport(null);setEditingKey(null);
+    setGroomers([emptyGroomer()]);setOps(EMPTY_OPS);setNotes("");setValidationError("");setBehaviourVal(5);
+  };
+
+  const startEdit=(r)=>{
+    setEditingKey(r._storageKey);setDate(r.date);
+    setGroomers(r.groomers.map(g=>{
+      // Build slots — handle both new per-groomer slots format and old flat appointments format
+      let slots;
+      if(g.slots && g.slots.length>0 && g.slots.some(s=>s.dogName?.trim())){
+        slots = Array.from({length:NUM_SLOTS},(_,i)=>g.slots[i]?{dogName:g.slots[i].dogName||"",service:g.slots[i].service||"Full Groom",isLargeXL:!!g.slots[i].isLargeXL}:emptySlot());
+      } else if(r.appointments && r.appointments.length>0){
+        const mine = r.appointments.filter(a=>a.groomer===g.name);
+        slots = Array.from({length:NUM_SLOTS},(_,i)=>mine[i]?{dogName:mine[i].dogName||"",service:mine[i].service||"Full Groom",isLargeXL:!!mine[i].isLargeXL}:emptySlot());
+      } else {
+        slots = Array.from({length:NUM_SLOTS},emptySlot);
+      }
+      const wholeHrs = Math.floor(g.hours);
+      const remMins = Math.round((g.hours - wholeHrs)*60);
+      return { name:g.name, mood:MOOD_LABELS.indexOf(g.mood), hours:String(wholeHrs), mins:remMins>0?String(remMins):"", slots };
+    }));
+    const bv = r.ops?.dogBehaviour??5;
+    setOps({noShows:String(r.ops?.noShows??0),newClients:String(r.ops?.newClients??0),dogBehaviour:bv});
+    setBehaviourVal(bv);
+    setNotes(r.notes||"");
+    setStep(1);setSubmitted(false);setValidationError("");setView("form");
+  };
+
+  if(view==="history") return <HistoryScreen reports={reports} onBack={()=>setView("form")} onEdit={startEdit}/>;
+  if(view==="detail"&&lastReport) return <ReportDetailScreen report={lastReport} onBack={()=>{setView("form");setSubmitted(true);}}/>;
+
+  const C={purple:"#c85a2a",purpleMid:"#FD8F67",purpleLight:"#fff0e8",gold:"#FD8F67",bg:"#fff8f5",card:"#ffffff",text:"#0f172a",muted:"#64748b",border:"#e2e8f0"};
+  const card={backgroundColor:C.card,borderRadius:16,padding:"18px 16px",boxShadow:"0 1px 8px rgba(0,0,0,0.06),0 0 0 1px rgba(0,0,0,0.03)",marginBottom:12};
+  const inp={border:`1.5px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:16,fontFamily:"inherit",width:"100%",outline:"none",boxSizing:"border-box",backgroundColor:"white",color:C.text};
+  const sel={...inp,appearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center",paddingRight:30};
+  const pct=step===1?50:100;
+
+  if(submitted) return (
+    <div style={{fontFamily:"'Nunito','Segoe UI',sans-serif",backgroundColor:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap'); *{box-sizing:border-box}`}</style>
+      <div style={{textAlign:"center",maxWidth:380,width:"100%"}}>
+        <div style={{fontSize:72,marginBottom:12}}>✂️</div>
+        <h1 style={{color:C.purple,fontWeight:900,fontSize:26,margin:"0 0 8px"}}>Report Saved!</h1>
+        <p style={{color:C.muted,fontSize:15,marginBottom:24}}>
+          {new Date(date+"T00:00:00").toLocaleDateString("en-AU",{weekday:"long",day:"numeric",month:"long"})}'s grooming report is saved. {reports.length} report{reports.length!==1?"s":""} in history.
+        </p>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {lastReport&&<button onClick={()=>setView("detail")} style={{backgroundColor:C.gold,color:"white",border:"none",borderRadius:12,padding:14,fontSize:16,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>📲 Screenshot Format for Google Chat</button>}
+          <button onClick={reset} style={{backgroundColor:C.purple,color:"white",border:"none",borderRadius:12,padding:14,fontSize:16,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>Submit Another Report</button>
+          <button onClick={()=>setView("history")} style={{backgroundColor:"white",color:C.purple,border:`2px solid ${C.purple}`,borderRadius:12,padding:14,fontSize:16,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>📋 View History & Export CSV</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{fontFamily:"'Nunito','Segoe UI',sans-serif",backgroundColor:C.bg,minHeight:"100vh",color:C.text}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
+        *{box-sizing:border-box}
+        input[type=number]{-moz-appearance:textfield}
+        input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+        button{touch-action:manipulation}
+        select{-webkit-appearance:none}
+        textarea{resize:vertical}
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{backgroundColor:C.purple,padding:"18px 16px 14px",color:"white",position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+          <div style={{fontSize:26}}>✂️</div>
+          <div>
+            <div style={{fontWeight:900,fontSize:17,letterSpacing:"0.5px"}}>THE HOUND HUTT</div>
+            <div style={{fontSize:11,opacity:0.75,fontWeight:700,letterSpacing:"1px"}}>{editingKey?"✏️ EDITING REPORT":"GROOMING DAILY REPORT"}</div>
+          </div>
+          <button onClick={()=>setView("history")} style={{marginLeft:"auto",backgroundColor:"rgba(255,255,255,0.18)",border:"none",borderRadius:10,padding:"7px 12px",color:"white",fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>
+            📋 {loadingReports?"...":reports.length}
+          </button>
+        </div>
+        <div style={{backgroundColor:"rgba(255,255,255,0.2)",borderRadius:99,height:6,overflow:"hidden"}}>
+          <div style={{backgroundColor:C.gold,height:"100%",width:`${pct}%`,borderRadius:99,transition:"width 0.4s ease"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:7,fontSize:11,fontWeight:700}}>
+          {["✂️ GROOMERS & DOGS","📊 OPS & NOTES"].map((l,i)=><span key={i} style={{opacity:step>=i+1?1:0.45}}>{l}</span>)}
+        </div>
+      </div>
+
+      <div style={{padding:"14px 14px 100px"}}>
+
+        {/* ── STEP 1: GROOMERS & DOGS ── */}
+        {step===1&&(
+          <div>
+            {/* Date */}
+            <div style={card}>
+              <label style={{fontWeight:800,fontSize:13,color:C.muted,display:"block",marginBottom:8,letterSpacing:"0.5px"}}>📅 DATE</label>
+              <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inp}/>
+            </div>
+
+            {/* One card per groomer */}
+            {groomers.map((g,gi)=>(
+              <div key={gi} style={card}>
+                {/* Groomer header */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                  <div style={{fontWeight:900,fontSize:16,color:C.purple}}>✂️ Groomer {gi+1}</div>
+                  {groomers.length>1&&(
+                    <button onClick={()=>removeGroomer(gi)} style={{backgroundColor:"#fef2f2",border:"none",borderRadius:8,padding:"5px 10px",color:"#ef4444",fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Remove</button>
+                  )}
+                </div>
+
+                {/* Name */}
+                <input type="text" placeholder="Groomer name" value={g.name} onChange={e=>updateGroomer(gi,"name",e.target.value)}
+                  style={{...inp,fontWeight:700,marginBottom:10}}/>
+
+                {/* Hours only */}
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16}}>
+                  <div style={{display:"flex",gap:6,alignItems:"center",flex:1,justifyContent:"flex-end"}}>
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+                        <input type="number" min="0" max="24" step="1" placeholder="0" value={g.hours}
+                          onChange={e=>updateGroomer(gi,"hours",e.target.value)}
+                          onWheel={e=>e.target.blur()}
+                          style={{...inp,width:62,textAlign:"center",padding:"10px 4px",fontSize:16,borderColor:g.name.trim()&&g.hours===""&&g.mins===""?"#fca5a5":C.border}}/>
+                        <span style={{fontSize:9,fontWeight:700,color:C.muted,marginTop:2}}>hrs</span>
+                      </div>
+                      <span style={{fontWeight:900,color:C.muted,fontSize:18,paddingBottom:14}}>:</span>
+                      <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+                        <input type="number" min="0" max="59" step="1" placeholder="0" value={g.mins||""}
+                          onChange={e=>updateGroomer(gi,"mins",e.target.value)}
+                          onWheel={e=>e.target.blur()}
+                          style={{...inp,width:62,textAlign:"center",padding:"10px 4px",fontSize:16}}/>
+                        <span style={{fontSize:9,fontWeight:700,color:C.muted,marginTop:2}}>min</span>
+                      </div>
+                    </div>
+                </div>
+
+                {/* Dog slots */}
+                <div style={{borderTop:`2px solid ${C.purpleLight}`,paddingTop:12}}>
+                  <div style={{fontWeight:900,fontSize:13,color:C.purple,marginBottom:10}}>🐕 Booking Schedule</div>
+                  {g.slots.map((s,si)=>(
+                    <div key={si} style={{marginBottom:10,padding:"10px",borderRadius:10,backgroundColor:s.dogName.trim()?"#fff8f5":"#f8fafc",border:`1.5px solid ${s.dogName.trim()?C.purpleMid:C.border}`}}>
+                      {/* Slot number + dog name */}
+                      <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:s.dogName.trim()?8:0}}>
+                        <div style={{width:24,height:24,borderRadius:6,backgroundColor:s.dogName.trim()?C.purple:"#e2e8f0",color:s.dogName.trim()?"white":C.muted,fontSize:11,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{si+1}</div>
+                        <input type="text" placeholder={`Dog ${si+1}`} value={s.dogName}
+                          onChange={e=>updateSlot(gi,si,"dogName",e.target.value)}
+                          style={{...inp,flex:1,padding:"7px 12px",fontSize:14,fontWeight:700}}/>
+                      </div>
+                      {/* Service + size — only show when dog name entered */}
+                      {s.dogName.trim()&&(
+                        <div style={{paddingLeft:32,display:"flex",flexDirection:"column",gap:6}}>
+                          <select value={s.service} onChange={e=>updateSlot(gi,si,"service",e.target.value)}
+                            style={{...sel,fontSize:13,padding:"8px 28px 8px 10px"}}>
+                            {SERVICES.map(sv=><option key={sv} value={sv}>{sv}</option>)}
+                          </select>
+                          <button onClick={()=>updateSlot(gi,si,"isLargeXL",!s.isLargeXL)}
+                            style={{padding:"7px",borderRadius:8,border:"2px solid",borderColor:s.isLargeXL?"#b45309":"#e2e8f0",backgroundColor:s.isLargeXL?"#fef3c7":"white",color:s.isLargeXL?"#b45309":C.muted,fontSize:12,fontWeight:800,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"}}>
+                            {s.isLargeXL?"🐾🐾 Large / XL — 2 slots":"🐾 Standard — 1 slot · tap if Large/XL"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            <button onClick={addGroomer} style={{width:"100%",padding:14,borderRadius:12,border:`2px dashed ${C.purpleMid}`,backgroundColor:C.purpleLight,color:C.purple,fontSize:15,fontWeight:800,cursor:"pointer",fontFamily:"inherit",marginBottom:12}}>
+              + Add Another Groomer
+            </button>
+          </div>
+        )}
+
+        {/* ── STEP 2: OPS & NOTES ── */}
+        {step===2&&(
+          <div>
+            <div style={card}>
+              <div style={{fontWeight:900,fontSize:17,marginBottom:16}}>📊 Numbers</div>
+              {/* Auto summary */}
+              <div style={{backgroundColor:"#fff8f5",borderRadius:10,padding:"10px 14px",marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:6,letterSpacing:"0.5px"}}>FROM BOOKING SCHEDULE</div>
+                {[["Total Dogs",totalDogs,"🐕"],["Total Slots Used",totalSlots,"📋"],["Groomers on Site",groomers.filter(g=>g.name.trim()).length,"💈"],["Total Hours",totalHours+"h","⏱️"]].map(([label,val,emoji])=>(
+                  <div key={label} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:`1px solid ${C.border}`}}>
+                    <span style={{fontSize:13,fontWeight:600,color:C.muted}}>{emoji} {label}</span>
+                    <span style={{fontWeight:900,fontSize:14,color:C.purple}}>{val}</span>
+                  </div>
+                ))}
+              </div>
+              {/* Per-groomer dog count */}
+              <div style={{backgroundColor:"#f8fafc",borderRadius:10,padding:"10px 14px",marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:C.muted,marginBottom:6,letterSpacing:"0.5px"}}>DOGS PER GROOMER</div>
+                {groomers.filter(g=>g.name.trim()).map((g,i)=>{
+                  const filled=g.slots.filter(s=>s.dogName.trim());
+                  const slots=filled.reduce((s,d)=>s+(d.isLargeXL?2:1),0);
+                  const hrs=(parseFloat(g.hours)||0)+(parseInt(g.mins||0)||0)/60;
+                  const avgTime=filled.length>0&&hrs>0?(hrs/filled.length):null;
+                  return (
+                    <div key={i} style={{padding:"5px 0",borderBottom:`1px solid ${C.border}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontSize:13,fontWeight:700,color:C.muted}}>✂️ {g.name}</span>
+                        <span style={{fontWeight:900,fontSize:13,color:C.purple}}>{filled.length} dogs · {slots} slots</span>
+                      </div>
+                      {avgTime&&<div style={{fontSize:11,fontWeight:700,color:"#0f766e",marginTop:1}}>⏱️ Average {fmtTime(parseFloat(avgTime))} per dog</div>}
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Dog Behaviour Slider */}
+              <div style={{backgroundColor:"white",borderRadius:10,padding:"12px 14px",marginBottom:4,border:`1.5px solid ${C.border}`}}>
+                <style>{`
+                  .behaviour-slider{-webkit-appearance:none;appearance:none;width:100%;height:10px;border-radius:99px;background:linear-gradient(to right,#ef4444,#f97316,#eab308,#84cc16,#22c55e);outline:none;cursor:pointer;}
+                  .behaviour-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:28px;height:28px;border-radius:50%;background:white;border:3px solid #c85a2a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
+                  .behaviour-slider::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:white;border:3px solid #c85a2a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
+                `}</style>
+                <div style={{fontSize:12,fontWeight:900,color:C.purple,marginBottom:10,letterSpacing:"0.3px"}}>🐕 How Well Behaved Were the Dogs Today?</div>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{fontSize:28}}>😡</span>
+                  <input className="behaviour-slider" type="range" min="1" max="10" value={behaviourVal}
+                    onChange={e=>handleBehaviourChange(parseInt(e.target.value))}
+                    onWheel={e=>e.target.blur()}/>
+                  <span style={{fontSize:28}}>😊</span>
+                </div>
+                <div style={{textAlign:"center",marginTop:8}}>
+                  <span style={{fontWeight:900,fontSize:20,color:DOG_BEHAVIOUR_COLOR(behaviourVal)}}>{behaviourVal}</span>
+                  <span style={{fontSize:13,fontWeight:700,color:DOG_BEHAVIOUR_COLOR(behaviourVal),marginLeft:8}}>— {DOG_BEHAVIOUR_LABELS[behaviourVal]}</span>
+                </div>
+              </div>
+
+              {/* Manual entries */}
+              {[["noShows","No-Shows / Cancellations","❌"],["newClients","New Clients","🆕"]].map(([key,label,emoji])=>(
+                <div key={key} style={{display:"flex",alignItems:"center",gap:12,paddingBottom:12,marginBottom:4,borderBottom:`1px solid ${C.border}`}}>
+                  <span style={{fontSize:22,flexShrink:0,width:30,textAlign:"center"}}>{emoji}</span>
+                  <div style={{flex:1,fontWeight:700,fontSize:14}}>{label}</div>
+                  <input type="number" min="0" value={ops[key]} onChange={e=>setOps(p=>({...p,[key]:e.target.value}))}
+                    style={{...inp,width:72,textAlign:"center",padding:"10px 6px"}}/>
+                </div>
+              ))}
+            </div>
+
+            {/* Notes — same as team weather report */}
+            <div style={card}>
+              <label style={{fontWeight:900,fontSize:16,display:"block",marginBottom:10}}>📝 Notes</label>
+              <textarea value={notes} onChange={e=>setNotes(e.target.value)}
+                placeholder="Please write detailed notes about the day"
+                rows={5} style={{...inp,resize:"vertical"}}/>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* FOOTER */}
+      <div style={{position:"fixed",bottom:0,left:0,right:0,backgroundColor:"white",borderTop:`1px solid ${C.border}`,padding:"10px 14px",boxShadow:"0 -4px 16px rgba(0,0,0,0.06)"}}>
+        {validationError&&(
+          <div style={{backgroundColor:"#fef2f2",border:"1px solid #fca5a5",borderRadius:10,padding:"9px 14px",marginBottom:8,fontSize:13,fontWeight:700,color:"#dc2626",display:"flex",alignItems:"center",gap:6}}>
+            ⚠️ {validationError}
+          </div>
+        )}
+        <div style={{display:"flex",gap:10}}>
+          {step>1&&<button onClick={()=>{setStep(s=>s-1);setValidationError("");}} style={{flex:1,padding:14,borderRadius:12,border:`2px solid ${C.border}`,backgroundColor:"white",color:C.text,fontSize:15,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>← Back</button>}
+          {step<2
+            ?<button onClick={handleNext} style={{flex:2,padding:14,borderRadius:12,border:"none",backgroundColor:C.purple,color:"white",fontSize:15,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>Next →</button>
+            :<button onClick={handleSubmit} disabled={submitting} style={{flex:2,padding:14,borderRadius:12,border:"none",backgroundColor:submitting?"#94a3b8":C.gold,color:"white",fontSize:15,fontWeight:800,cursor:submitting?"not-allowed":"pointer",fontFamily:"inherit"}}>
+              {submitting?"⏳ Saving...":(editingKey?"💾 Save Changes":"✅ Submit Report")}
+            </button>
+          }
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
