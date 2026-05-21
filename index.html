@@ -49,18 +49,6 @@ const _storage = {
   }
 };
 
-// ── Google Sheets sync ───────────────────────────────────────────
-const GROOMING_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz6fDeku6udgbZDcc_T3gWEZs5PCtGs5l1NJ5p6xSt7vHEufHuRM1BZjpKUSq6UeU-e/exec';
-
-async function syncToSheets(key, report) {
-  try {
-    const payload = encodeURIComponent(JSON.stringify({ key, report }));
-    await fetch(GROOMING_SCRIPT_URL + '?action=saveGrooming&data=' + payload);
-  } catch(e) {
-    console.warn('Sheets sync failed:', e);
-  }
-}
-
 function downloadCSV(reports) {
   const blob = new Blob([buildCSV(reports)], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
@@ -373,7 +361,7 @@ function App() {
   useEffect(()=>{
     (async()=>{
       try{
-        const result=await _storage.list("groom:");
+        const result=await _storage.list("hh-groom:");
         if(result?.keys?.length){
           const loaded=await Promise.all(result.keys.map(async key=>{
             try{const r=await _storage.get(key);return r?{...JSON.parse(r.value),_storageKey:key}:null;}catch{return null;}
