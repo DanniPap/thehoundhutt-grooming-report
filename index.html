@@ -13,17 +13,38 @@
   <script type="text/babel">
 const { useState, useMemo, useEffect } = React;
 
+const HH_GROOMING_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxaufLECuIG2B3Od4lzplEzkhUgsAANIQQHL4AS833hNnelyimRzY2XmNSuxiz2TacbKQ/exec';
+
 const _storage = {
+  _cache: null,
+
+  async _fetchAll() {
+    if (this._cache) return this._cache;
+    try {
+      const res = await fetch(HH_GROOMING_SCRIPT_URL + '?action=listGrooming');
+      const data = await res.json();
+      this._cache = Array.isArray(data) ? data : [];
+    } catch(e) { this._cache = []; }
+    return this._cache;
+  },
+
   async list(prefix) {
-    const keys = Object.keys(localStorage).filter(k => k.startsWith(prefix));
+    const reports = await this._fetchAll();
+    const keys = reports.map(r => r._storageKey).filter(k => k && k.startsWith(prefix));
     return { keys };
   },
+
   async get(key) {
-    const value = localStorage.getItem(key);
-    return value !== null ? { value } : null;
+    const reports = await this._fetchAll();
+    const report = reports.find(r => r._storageKey === key);
+    return report ? { value: JSON.stringify(report) } : null;
   },
+
   async set(key, value) {
-    localStorage.setItem(key, String(value));
+    this._cache = null;
+    const report = JSON.parse(value);
+    const payload = encodeURIComponent(JSON.stringify({ key, report }));
+    await fetch(HH_GROOMING_SCRIPT_URL + '?action=saveGrooming&data=' + payload);
     return { key, value };
   }
 };
@@ -110,7 +131,7 @@ function CSVModal({ csv, onClose }) {
         <p style={{fontSize:13,color:"#64748b",margin:0}}>Copy everything below, then paste into Excel or Google Sheets (File → Import, or just paste into cell A1).</p>
         <textarea readOnly value={csv} onClick={e=>e.target.select()}
           style={{flex:1,minHeight:220,fontFamily:"monospace",fontSize:11,border:"1.5px solid #e2e8f0",borderRadius:10,padding:10,resize:"none",color:"#0f172a",backgroundColor:"#f8fafc"}}/>
-        <button onClick={copy} style={{padding:"13px",borderRadius:12,border:"none",backgroundColor:copied?"#22c55e":"#c85a2a",color:"white",fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit",transition:"background 0.2s"}}>
+        <button onClick={copy} style={{padding:"13px",borderRadius:12,border:"none",backgroundColor:copied?"#22c55e":"#cc7a3a",color:"white",fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit",transition:"background 0.2s"}}>
           {copied?"✅ Copied!":"📋 Copy All"}
         </button>
       </div>
@@ -122,7 +143,7 @@ function CSVModal({ csv, onClose }) {
 function ReportDetailScreen({ report:r, onBack }) {
   const dateStr=new Date(r.date+"T00:00:00").toLocaleDateString("en-AU",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
   const moodEmoji={"Great":"😄","Good":"😊","Okay":"😐","Down":"😕","Stressed":"😤"};
-  const C={purple:"#c85a2a",muted:"#64748b",border:"#e8edf2"};
+  const C={purple:"#cc7a3a",muted:"#64748b",border:"#e8edf2"};
   const serviceShort={"Full Groom":"Full","Maintenance Groom":"Maint.","Style Groom":"Style","Deshed":"Deshed","Puppy Cut":"Puppy"};
 
   return (
@@ -267,7 +288,7 @@ function ReportDetailScreen({ report:r, onBack }) {
 
 // ── History Screen ────────────────────────────────────────────────
 function HistoryScreen({ reports, onBack, onEdit }) {
-  const C={purple:"#c85a2a",gold:"#FD8F67",muted:"#64748b",border:"#e2e8f0",text:"#0f172a"};
+  const C={purple:"#cc7a3a",gold:"#FFB980",muted:"#64748b",border:"#e2e8f0",text:"#0f172a"};
   const [selected,setSelected]=useState(null);
   const [csvData,setCsvData]=useState(null);
   const sorted=[...reports].sort((a,b)=>b.date.localeCompare(a.date));
@@ -318,7 +339,7 @@ function HistoryScreen({ reports, onBack, onEdit }) {
               </div>
             </div>
             <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <button onClick={e=>{e.stopPropagation();onEdit(r);}} style={{backgroundColor:"#fff8f5",border:"1.5px solid #FD8F67",borderRadius:8,padding:"7px 14px",color:C.purple,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✏️ Edit</button>
+              <button onClick={e=>{e.stopPropagation();onEdit(r);}} style={{backgroundColor:"#fff8f5",border:"1.5px solid #FFB980",borderRadius:8,padding:"7px 14px",color:C.purple,fontWeight:800,fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>✏️ Edit</button>
               <span style={{fontSize:12,fontWeight:800,color:C.gold}}>📄 Tap to view report →</span>
             </div>
           </div>
@@ -421,7 +442,6 @@ function App() {
       const key=editingKey||`hh-groom:${date}-${Date.now()}`;
       const rk={...report,_storageKey:key};
       await _storage.set(key,JSON.stringify(rk));
-      syncToSheets(key, rk);
       setReports(prev=>editingKey?prev.map(r=>r._storageKey===editingKey?rk:r):[...prev,rk]);
       setLastReport(rk);setEditingKey(null);setSubmitted(true);
     }catch(e){alert("Save failed: "+e.message);}
@@ -460,7 +480,7 @@ function App() {
   if(view==="history") return <HistoryScreen reports={reports} onBack={()=>setView("form")} onEdit={startEdit}/>;
   if(view==="detail"&&lastReport) return <ReportDetailScreen report={lastReport} onBack={()=>{setView("form");setSubmitted(true);}}/>;
 
-  const C={purple:"#c85a2a",purpleMid:"#FD8F67",purpleLight:"#fff0e8",gold:"#FD8F67",bg:"#fff8f5",card:"#ffffff",text:"#0f172a",muted:"#64748b",border:"#e2e8f0"};
+  const C={purple:"#cc7a3a",purpleMid:"#FFB980",purpleLight:"#fff0e8",gold:"#FFB980",bg:"#fff8f5",card:"#ffffff",text:"#0f172a",muted:"#64748b",border:"#e2e8f0"};
   const card={backgroundColor:C.card,borderRadius:16,padding:"18px 16px",boxShadow:"0 1px 8px rgba(0,0,0,0.06),0 0 0 1px rgba(0,0,0,0.03)",marginBottom:12};
   const inp={border:`1.5px solid ${C.border}`,borderRadius:10,padding:"10px 14px",fontSize:16,fontFamily:"inherit",width:"100%",outline:"none",boxSizing:"border-box",backgroundColor:"white",color:C.text};
   const sel={...inp,appearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center",paddingRight:30};
@@ -638,8 +658,8 @@ function App() {
               <div style={{backgroundColor:"white",borderRadius:10,padding:"12px 14px",marginBottom:4,border:`1.5px solid ${C.border}`}}>
                 <style>{`
                   .behaviour-slider{-webkit-appearance:none;appearance:none;width:100%;height:10px;border-radius:99px;background:linear-gradient(to right,#ef4444,#f97316,#eab308,#84cc16,#22c55e);outline:none;cursor:pointer;}
-                  .behaviour-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:28px;height:28px;border-radius:50%;background:white;border:3px solid #c85a2a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
-                  .behaviour-slider::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:white;border:3px solid #c85a2a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
+                  .behaviour-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:28px;height:28px;border-radius:50%;background:white;border:3px solid #cc7a3a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
+                  .behaviour-slider::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:white;border:3px solid #cc7a3a;box-shadow:0 2px 8px rgba(0,0,0,0.25);cursor:pointer;}
                 `}</style>
                 <div style={{fontSize:12,fontWeight:900,color:C.purple,marginBottom:10,letterSpacing:"0.3px"}}>🐕 How Well Behaved Were the Dogs Today?</div>
                 <div style={{display:"flex",alignItems:"center",gap:10}}>
